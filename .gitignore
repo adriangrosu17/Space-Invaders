@@ -42,6 +42,10 @@
 *.idb
 *.pdb
 
+# Vim temporary files
+.*.*.swp
+.*.swp
+
 # Kernel Module Compile Results
 *.mod*
 *.cmd
