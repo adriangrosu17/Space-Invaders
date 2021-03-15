@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define TOTAL_MEMORY  (64 * 1024)
+#define START_ADDRESS (0x0000)
+
 typedef enum
 {
     B = 0,
@@ -26,15 +29,37 @@ typedef struct
 
 typedef struct
 {
+    uint8_t memory[TOTAL_MEMORY];
     uint8_t registers[TOTAL_REGISTERS];
+    uint32_t cycles;
     uint16_t pc;
     uint16_t sp;
-    uint8_t *ram;
     StatusBits flags;
     uint8_t init;
 }MicroprocState;
 
 static MicroprocState __attribute__((aligned(64))) Intel8080 = { 0 };
+
+static uint8_t InstructionCycles[] =
+{
+//         0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
+/* 0 */    4, 10,  7,  5,  5,  5,  7,  4,  4, 10,  7,  5,  5,  5,  7,  4,
+/* 1 */    4, 10,  7,  5,  5,  5,  7,  4,  4, 10,  7,  5,  5,  5,  7,  4,
+/* 2 */    4, 10, 16,  5,  5,  5,  7,  4,  4, 10, 16,  5,  5,  5,  7,  4,
+/* 3 */    4, 10, 13,  5, 10, 10, 10,  4,  4, 10, 13,  5,  5,  5,  7,  4,
+/* 4 */    5,  5,  5,  5,  5,  5,  7,  5,  5,  5,  5,  5,  5,  5,  7,  5,
+/* 5 */    5,  5,  5,  5,  5,  5,  7,  5,  5,  5,  5,  5,  5,  5,  7,  5,
+/* 6 */    5,  5,  5,  5,  5,  5,  7,  5,  5,  5,  5,  5,  5,  5,  7,  5,
+/* 7 */    7,  7,  7,  7,  7,  7,  7,  7,  5,  5,  5,  5,  5,  5,  7,  5,
+/* 8 */    4,  4,  4,  4,  4,  4,  7,  4,  4,  4,  4,  4,  4,  4,  7,  4,
+/* 9 */    4,  4,  4,  4,  4,  4,  7,  4,  4,  4,  4,  4,  4,  4,  7,  4,
+/* A */    4,  4,  4,  4,  4,  4,  7,  4,  4,  4,  4,  4,  4,  4,  7,  4,
+/* B */    4,  4,  4,  4,  4,  4,  7,  4,  4,  4,  4,  4,  4,  4,  7,  4,
+/* C */    5, 10, 10, 10, 11, 11,  7, 11,  5, 10, 10, 10, 11, 17,  7, 11,
+/* D */    5, 10, 10, 10, 11, 11,  7, 11,  5, 10, 10, 10, 11, 17,  7, 11,
+/* E */    5, 10, 10, 18, 11, 11,  7, 11,  5,  5, 10,  5, 11, 17,  7, 11,
+/* F */    5, 10, 10,  4, 11, 11,  7, 11,  5,  5, 10,  4, 11, 17,  7, 11,
+}
 
 static MicroprocError LoadBinary(const char *binary_name)
 {
@@ -58,15 +83,14 @@ static MicroprocError LoadBinary(const char *binary_name)
             {
                 size_t binary_size = ftell(file);
                 rewind(file);
-                Intel8080.ram = (uint8_t *)malloc(binary_size);
-                if(NULL == Intel8080.ram)
+                if(binary_size + START_ADDRESS >= TOTAL_MEMORY)
                 {
-                    printf("Not enough heap available to allocate for the binary\n");
+                    printf("Not enough memory available to load the binary\n");
                     ret = MEMORY_FAIL;
                 }
                 else
                 {
-                    fread(Intel8080.ram, sizeof(uint8_t), binary_size, file);
+                    fread(&Intel8080.memory[START_ADDRESS], sizeof(uint8_t), binary_size, file);
                     printf("Loaded %u bytes\n", binary_size);
                 }
             }
@@ -85,20 +109,23 @@ static MicroprocError LoadBinary(const char *binary_name)
     return ret;
 }
 
-static uint8_t ExecInstruction(void)
+#if defined(DEBUG)
+static void DisassembleInstruction(uint8_t *instruction)
 {
-    uint8_t size = 1, cycles = 4;
-    switch(*pc)
+    if(NULL == instruction)
+    {
+        printf("NULL instruction parameter\n");
+        return;
+    }
+    switch(*instruction)
     {
         case 0x00: printf("NOP\n"); break;
-        case 0x01: size = 3;
-                   printf("LXI B, %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0x01: printf("LXI B, %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0x02: printf("STAX B\n"); break;
         case 0x03: printf("INX B\n"); break;
         case 0x04: printf("INR B\n"); break;
         case 0x05: printf("DCR B\n"); break;
-        case 0x06: size = 2;
-                   printf("MVI B, %#02X\n", bin[offset + 1]); break;
+        case 0x06: printf("MVI B, %#02X\n", instruction[1]); break;
         case 0x07: printf("RLC\n"); break;
         case 0x08: printf("*NOP\n"); break;
         case 0x09: printf("DAD B\n"); break;
@@ -106,18 +133,15 @@ static uint8_t ExecInstruction(void)
         case 0x0B: printf("DCX B\n"); break;
         case 0x0C: printf("INR C\n"); break;
         case 0x0D: printf("DCR C\n"); break;
-        case 0x0E: size = 2;
-                   printf("MVI C, %#02X\n", bin[offset + 1]); break;
+        case 0x0E: printf("MVI C, %#02X\n", instruction[1]); break;
         case 0x0F: printf("RRC\n"); break;
         case 0x10: printf("*NOP\n"); break;
-        case 0x11: size = 3;
-                   printf("LXI D, %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0x11: printf("LXI D, %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0x12: printf("STAX D\n"); break;
         case 0x13: printf("INX D\n"); break;
         case 0x14: printf("INR D\n"); break;
         case 0x15: printf("DCR D\n"); break;
-        case 0x16: size = 2;
-                   printf("MVI D, %#02X\n", bin[offset + 1]); break;
+        case 0x16: printf("MVI D, %#02X\n", instruction[1]); break;
         case 0x17: printf("RAL\n"); break;
         case 0x18: printf("*NOP\n"); break;
         case 0x19: printf("DAD D\n"); break;
@@ -125,50 +149,39 @@ static uint8_t ExecInstruction(void)
         case 0x1B: printf("DCX D\n"); break;
         case 0x1C: printf("INR E\n"); break;
         case 0x1D: printf("DCR E\n"); break;
-        case 0x1E: size = 2;
-                   printf("MVI E, %#02X\n", bin[offset + 1]); break;
+        case 0x1E: printf("MVI E, %#02X\n", instruction[1]); break;
         case 0x1F: printf("RAR\n"); break;
         case 0x20: printf("*NOP\n"); break;
-        case 0x21: size = 3;
-                   printf("LXI H, %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0x22: size = 3;
-                   printf("SHLD %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0x21: printf("LXI H, %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0x22: printf("SHLD %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0x23: printf("INX H\n"); break;
         case 0x24: printf("INR H\n"); break;
         case 0x25: printf("DCR H\n"); break;
-        case 0x26: size = 2;
-                   printf("MVI H, %#02X\n", bin[offset + 1]); break;
+        case 0x26: printf("MVI H, %#02X\n", instruction[1]); break;
         case 0x27: printf("DAA\n"); break;
         case 0x28: printf("*NOP\n"); break;
         case 0x29: printf("DAD H\n"); break;
-        case 0x2A: size = 3;
-                   printf("LHLD %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0x2A: printf("LHLD %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0x2B: printf("DCX H\n"); break;
         case 0x2C: printf("INR L\n"); break;
         case 0x2D: printf("DCR L\n"); break;
-        case 0x2E: size = 2;
-                   printf("MVI L, %#02X\n", bin[offset + 1]); break;
+        case 0x2E: printf("MVI L, %#02X\n", instruction[1]); break;
         case 0x2F: printf("CMA\n"); break;
         case 0x30: printf("*NOP\n"); break;
-        case 0x31: size = 3;
-                   printf("LXI SP, %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0x32: size = 3;
-                   printf("STA %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0x31: printf("LXI SP, %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0x32: printf("STA %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0x33: printf("INX SP\n"); break;
         case 0x34: printf("INR M\n"); break;
         case 0x35: printf("DCR M\n"); break;
-        case 0x36: size = 2;
-                   printf("MVI M, %#02X\n", bin[offset + 1]); break;
+        case 0x36: printf("MVI M, %#02X\n", instruction[1]); break;
         case 0x37: printf("STC\n"); break;
         case 0x38: printf("*NOP\n"); break;
         case 0x39: printf("DAD SP\n"); break;
-        case 0x3A: size = 3;
-                   printf("LDA %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0x3A: printf("LDA %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0x3B: printf("DCX SP\n"); break;
         case 0x3C: printf("INR A\n"); break;
         case 0x3D: printf("DCR A\n"); break;
-        case 0x3E: size = 2;
-                   printf("MVI A, %#02X\n", bin[offset + 1]); break;
+        case 0x3E: printf("MVI A, %#02X\n", instruction[1]); break;
         case 0x3F: printf("CMC\n"); break;
         case 0x40: printf("MOV B, B\n"); break;
         case 0x41: printf("MOV B, C\n"); break;
@@ -300,104 +313,72 @@ static uint8_t ExecInstruction(void)
         case 0xBF: printf("CMP A\n"); break;
         case 0xC0: printf("RNZ\n"); break;
         case 0xC1: printf("POP B\n"); break;
-        case 0xC2: size = 3;
-                   printf("JNZ %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xC3: size = 3;
-                   printf("JMP %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xC4: size = 3;
-                   printf("CNZ %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0xC2: printf("JNZ %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xC3: printf("JMP %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xC4: printf("CNZ %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0xC5: printf("PUSH B\n"); break;
-        case 0xC6: size = 3;
-                   printf("ADI %#02X\n", bin[offset + 1]); break;
+        case 0xC6: printf("ADI %#02X\n", instruction[1]); break;
         case 0xC7: printf("RST 0\n"); break;
         case 0xC8: printf("RZ\n"); break;
         case 0xC9: printf("RET\n"); break;
-        case 0xCA: size = 3;
-                   printf("JZ %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xCB: size = 3;
-                   printf("*JMP %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xCC: size = 3;
-                   printf("CZ %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xCD: size = 3;
-                   printf("CALL %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xCE: size = 2;
-                   printf("ACI %#02X\n", bin[offset + 1]); break;
+        case 0xCA: printf("JZ %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xCB: printf("*JMP %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xCC: printf("CZ %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xCD: printf("CALL %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xCE: printf("ACI %#02X\n", instruction[1]); break;
         case 0xCF: printf("RST 1\n"); break;
         case 0xD0: printf("RNC\n"); break;
         case 0xD1: printf("POP D\n"); break;
-        case 0xD2: size = 3;
-                   printf("JNC %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xD3: size = 2;
-                   printf("OUT %#02X\n", bin[offset + 1]); break;
-        case 0xD4: size = 3;
-                   printf("CNC %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0xD2: printf("JNC %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xD3: printf("OUT %#02X\n", instruction[1]); break;
+        case 0xD4: printf("CNC %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0xD5: printf("PUSH D\n"); break;
-        case 0xD6: size = 2;
-                   printf("SUI %#02X\n", bin[offset + 1]); break;
+        case 0xD6: printf("SUI %#02X\n", instruction[1]); break;
         case 0xD7: printf("RST 2\n"); break;
         case 0xD8: printf("RC\n"); break;
         case 0xD9: printf("*RET\n"); break;
-        case 0xDA: size = 3;
-                   printf("JC %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xDB: size = 2;
-                   printf("IN %#02X\n", bin[offset + 1]); break;
-        case 0xDC: size = 3;
-                   printf("CC %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xDD: size = 3;
-                   printf("*CALL %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xDE: size = 2;
-                   printf("SBI %#02X\n", bin[offset + 1]); break;
+        case 0xDA: printf("JC %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xDB: printf("IN %#02X\n", instruction[1]); break;
+        case 0xDC: printf("CC %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xDD: printf("*CALL %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xDE: printf("SBI %#02X\n", instruction[1]); break;
         case 0xDF: printf("RST 3\n"); break;
         case 0xE0: printf("ROP\n"); break;
         case 0xE1: printf("POP H\n"); break;
-        case 0xE2: size = 3;
-                   printf("JPO %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0xE2: printf("JPO %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0xE3: printf("XTHL\n"); break;
-        case 0xE4: size = 3;
-                   printf("CPO %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0xE4: printf("CPO %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0xE5: printf("PUSH H\n"); break;
-        case 0xE6: size = 2;
-                   printf("ANI %#02X\n", bin[offset + 1]); break;
+        case 0xE6: printf("ANI %#02X\n", instruction[1]); break;
         case 0xE7: printf("RST 4\n"); break;
         case 0xE8: printf("RPE\n"); break;
         case 0xE9: printf("PCHL\n"); break;
-        case 0xEA: size = 3;
-                   printf("JPE %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0xEA: printf("JPE %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0xEB: printf("XCHG\n"); break;
-        case 0xEC: size = 3;
-                   printf("CPE %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xED: size = 3;
-                   printf("*CALL %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xEE: size = 2;
-                   printf("XRI %#02X\n", bin[offset + 1]); break;
+        case 0xEC: printf("CPE %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xED: printf("*CALL %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xEE: printf("XRI %#02X\n", instruction[1]); break;
         case 0xEF: printf("RST 5\n"); break;
         case 0xF0: printf("RP\n"); break;
         case 0xF1: printf("POP PSW\n"); break;
-        case 0xF2: size = 3;
-                   printf("JP %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0xF2: printf("JP %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0xF3: printf("DI\n"); break;
-        case 0xF4: size = 3;
-                   printf("CP %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0xF4: printf("CP %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0xF5: printf("PUSH PSW\n"); break;
-        case 0xF6: size = 2;
-                   printf("ORI %#02X\n", bin[offset + 1]); break;
+        case 0xF6: printf("ORI %#02X\n", instruction[1]); break;
         case 0xF7: printf("RST 6\n"); break;
         case 0xF8: printf("RM\n"); break;
         case 0xF9: printf("SPHL\n"); break;
-        case 0xFA: size = 3;
-                   printf("JM %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
+        case 0xFA: printf("JM %#04X\n", (instruction[2] << 8) | instruction[1]); break;
         case 0xFB: printf("EI\n"); break;
-        case 0xFC: size = 3;
-                   printf("CM %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xFD: size = 3;
-                   printf("*CALL %#04X\n", (bin[offset + 2] << 8) | bin[offset + 1]); break;
-        case 0xFE: size = 2;
-                   printf("CPI %#02X\n", bin[offset + 1]); break;
+        case 0xFC: printf("CM %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xFD: printf("*CALL %#04X\n", (instruction[2] << 8) | instruction[1]); break;
+        case 0xFE: printf("CPI %#02X\n", instruction[1]); break;
         case 0xFF: printf("RST 7\n"); break;
-        default: size = 0; printf("UNKNOWN\n"); break;
+        default: printf("UNKNOWN\n"); break;
     }
-    return cycles;
 }
+#endif
 
 MicroprocError MicroprocInit(const char *binary_name)
 {
